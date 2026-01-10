@@ -258,6 +258,28 @@ class MCLLocalizationPF(Node):
 
         self.pub_particles.publish(msg)
 
+    def neff(self) -> float:
+        return 1.0 / sum(w * w for w in self.weights)
+    
+    def low_variance_resample(self) -> None:
+        N = self.N
+        new_particles: List[Particle] = []
+        r = random.uniform(0, 1.0 / N)
+        c = self.weights[0]
+        i = 0
+
+        for m in range(N):
+            U = r + m / N
+            while U > c and i < N - 1:
+                i += 1
+                c += self.weights[i]
+            p = self.particles[i]
+            # copy particle
+            new_particles.append(Particle(x=p.x, y=p.y, theta=p.theta))
+
+        self.particles = new_particles
+        self.weights = [1.0 / N] * N
+
 
 def main():
     rclpy.init()
