@@ -209,7 +209,39 @@ class MCLLocalizationPF(Node):
         worst = min(self.weights)
         self.get_logger().info(f"Measurement update: best weight={best:.6f}, worst weight={worst:.6f}")
 
+        neff = self.neff()
+        if neff < 0.5 * self.N:
+            self.low_variance_resample()
+            self.roughen()
+            self.get_logger().info(f"Resampled: Neff={neff:.1f} < {0.5 * self.N:.1f}")
+
         self.publish_particles()
+
+    def neff(self) -> float:
+        return 1.0 / sum(w * w for w in self.weights)
+
+    def low_variance_resample(self) -> None:
+        new_particles: List[Particle] = []
+        r = random.random() / self.N
+        c = self.weights[0]
+        i = 0
+
+        for m in range(self.N):
+            u = r + m / self.N
+            while u > c and i < self.N - 1:
+                i += 1
+                c += self.weights[i]
+            p = self.particles[i]
+            new_particles.append(Particle(x=p.x, y=p.y, theta=p.theta))
+
+        self.particles = new_particles
+        self.weights = [1.0 / self.N] * self.N
+
+    def roughen(self, std_xy: float = 0.01, std_th: float = 0.005) -> None:
+        for p in self.particles:
+            p.x += random.gauss(0.0, std_xy)
+            p.y += random.gauss(0.0, std_xy)
+            p.theta = wrap_to_pi(p.theta + random.gauss(0.0, std_th))
 
     def publish_particles(self) -> None:
         msg = PoseArray()
