@@ -205,6 +205,10 @@ class MCLLocalizationPF(Node):
         else:
             self.weights = [wi / s_w for wi in w]
 
+        best = max(self.weights)
+        worst = min(self.weights)
+        self.get_logger().info(f"Measurement update: best weight={best:.6f}, worst weight={worst:.6f}")
+
         self.publish_particles()
 
     def publish_particles(self) -> None:
