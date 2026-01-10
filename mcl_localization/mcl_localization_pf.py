@@ -1,0 +1,240 @@
+import math
+import random
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import rclpy
+from rclpy.node import Node
+
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseArray, Pose, Quaternion
+from sensor_msgs.msg import PointCloud2
+
+from sensor_msgs_py import point_cloud2
+
+
+def wrap_to_pi(a: float) -> float:
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def yaw_to_quat(yaw: float) -> Quaternion:
+    q = Quaternion()
+    q.z = math.sin(yaw / 2.0)
+    q.w = math.cos(yaw / 2.0)
+    return q
+
+
+def quat_to_yaw(q: Quaternion) -> float:
+    return 2.0 * math.atan2(q.z, q.w)
+
+
+@dataclass
+class Particle:
+    x: float
+    y: float
+    theta: float
+
+
+class MCLLocalizationPF(Node):
+    """
+    Task A2 + A3:
+      - Motion update from /robot_noisy (odometry)
+      - Measurement update from /landmarks_observed using /landmarks_gt map
+      - Gaussian sensor model
+      - Normalize weights
+    """
+
+    def __init__(self):
+        super().__init__("mcl_localization_pf")
+
+        # ---------- Parameters ----------
+        self.declare_parameter("num_particles", 200)
+        self.declare_parameter("x_min", -10.0)
+        self.declare_parameter("x_max", 10.0)
+        self.declare_parameter("y_min", -10.0)
+        self.declare_parameter("y_max", 10.0)
+        self.declare_parameter("frame_id", "map")
+
+        # Motion noise std devs
+        self.declare_parameter("trans_noise_std", 0.05)  # meters
+        self.declare_parameter("rot_noise_std", 0.02)    # radians
+
+        # Measurement noise variance (matches your fake_robot param name)
+        self.declare_parameter("measurement_noise_variance", 0.02)
+
+        # Topics
+        self.declare_parameter("odom_topic", "/robot_noisy")
+        self.declare_parameter("map_landmarks_topic", "/landmarks_gt")
+        self.declare_parameter("observed_landmarks_topic", "/landmarks_observed")
+
+        # ---------- Read params ----------
+        self.N = int(self.get_parameter("num_particles").value)
+        self.x_min = float(self.get_parameter("x_min").value)
+        self.x_max = float(self.get_parameter("x_max").value)
+        self.y_min = float(self.get_parameter("y_min").value)
+        self.y_max = float(self.get_parameter("y_max").value)
+        self.frame_id = str(self.get_parameter("frame_id").value)
+
+        self.trans_noise_std = float(self.get_parameter("trans_noise_std").value)
+        self.rot_noise_std = float(self.get_parameter("rot_noise_std").value)
+        self.meas_var = float(self.get_parameter("measurement_noise_variance").value)
+        self.meas_sigma = math.sqrt(max(self.meas_var, 1e-12))
+
+        self.odom_topic = str(self.get_parameter("odom_topic").value)
+        self.map_topic = str(self.get_parameter("map_landmarks_topic").value)
+        self.obs_topic = str(self.get_parameter("observed_landmarks_topic").value)
+
+        # ---------- State ----------
+        self.particles: List[Particle] = self._init_uniform_particles(self.N)
+        self.weights: List[float] = [1.0 / self.N] * self.N
+
+        self.prev_odom_pose: Optional[Tuple[float, float, float]] = None
+
+        # Map: id -> (x,y) in map frame
+        self.landmark_map: Dict[int, Tuple[float, float]] = {}
+
+        # ---------- ROS I/O ----------
+        self.pub_particles = self.create_publisher(PoseArray, "particles", 10)
+
+        self.sub_odom = self.create_subscription(Odometry, self.odom_topic, self.on_odom, 50)
+        self.sub_map = self.create_subscription(PointCloud2, self.map_topic, self.on_map_landmarks, 10)
+        self.sub_obs = self.create_subscription(PointCloud2, self.obs_topic, self.on_observed_landmarks, 50)
+
+        self.publish_particles()
+        self.get_logger().info(
+            f"MCLLocalizationPF started. N={self.N}, odom={self.odom_topic}, map={self.map_topic}, obs={self.obs_topic}, "
+            f"meas_sigma={self.meas_sigma:.4f}"
+        )
+
+    def _init_uniform_particles(self, N: int) -> List[Particle]:
+        out = []
+        for _ in range(N):
+            x = random.uniform(self.x_min, self.x_max)
+            y = random.uniform(self.y_min, self.y_max)
+            th = random.uniform(-math.pi, math.pi)
+            out.append(Particle(x=x, y=y, theta=th))
+        return out
+
+    # ------------------ Task A2: Motion update ------------------
+
+    def on_odom(self, msg: Odometry) -> None:
+        x = float(msg.pose.pose.position.x)
+        y = float(msg.pose.pose.position.y)
+        yaw = wrap_to_pi(quat_to_yaw(msg.pose.pose.orientation))
+
+        if self.prev_odom_pose is None:
+            self.prev_odom_pose = (x, y, yaw)
+            return
+
+        px, py, pyaw = self.prev_odom_pose
+        dx = x - px
+        dy = y - py
+        dtheta = wrap_to_pi(yaw - pyaw)
+        self.prev_odom_pose = (x, y, yaw)
+
+        trans = math.hypot(dx, dy)
+        direction = math.atan2(dy, dx)
+
+        for p in self.particles:
+            noisy_trans = trans + random.gauss(0.0, self.trans_noise_std)
+            noisy_rot = dtheta + random.gauss(0.0, self.rot_noise_std)
+
+            p.x += noisy_trans * math.cos(direction)
+            p.y += noisy_trans * math.sin(direction)
+            p.theta = wrap_to_pi(p.theta + noisy_rot)
+
+        # (We publish after measurement update too, but publishing here is fine)
+        self.publish_particles()
+
+    # ------------------ Map landmarks subscriber ------------------
+
+    def on_map_landmarks(self, msg: PointCloud2) -> None:
+        # Expect fields: x(float32), y(float32), z(float32), id(int32)
+        lm = {}
+        for pt in point_cloud2.read_points(msg, field_names=("x", "y", "id"), skip_nans=True):
+            x, y, lid = pt
+            lm[int(lid)] = (float(x), float(y))
+
+        if lm:
+            self.landmark_map = lm
+            self.get_logger().info(f"Loaded landmark map with {len(self.landmark_map)} landmarks (from {msg.header.frame_id}).")
+            # Optionally unsubscribe after first map to reduce load
+            # self.destroy_subscription(self.sub_map)
+
+    # ------------------ Task A3: Measurement update ------------------
+
+    def on_observed_landmarks(self, msg: PointCloud2) -> None:
+        if not self.landmark_map:
+            # Map not received yet
+            return
+
+        # Read observed points in robot frame with id
+        observations = []
+        for pt in point_cloud2.read_points(msg, field_names=("x", "y", "id"), skip_nans=True):
+            xr, yr, lid = pt
+            lid = int(lid)
+            if lid in self.landmark_map:
+                observations.append((float(xr), float(yr), lid))
+
+        if not observations:
+            # No usable observations -> keep weights as-is
+            return
+
+        inv_2sig2 = 1.0 / (2.0 * self.meas_sigma * self.meas_sigma)
+
+        # Compute log-likelihood for each particle
+        logw = []
+        for i, p in enumerate(self.particles):
+            c = math.cos(p.theta)
+            s = math.sin(p.theta)
+
+            ll = 0.0
+            for (xr, yr, lid) in observations:
+                # Transform obs from robot frame to map frame using particle pose
+                xm = p.x + c * xr - s * yr
+                ym = p.y + s * xr + c * yr
+
+                xg, yg = self.landmark_map[lid]
+                ex = xm - xg
+                ey = ym - yg
+                e2 = ex * ex + ey * ey
+
+                ll += -e2 * inv_2sig2  # log Gaussian (up to constant)
+
+            logw.append(ll)
+
+        # Convert log weights to normalized weights safely
+        maxll = max(logw)
+        w = [math.exp(lw - maxll) for lw in logw]  # shift for numerical stability
+        s_w = sum(w)
+        if s_w <= 0.0 or not math.isfinite(s_w):
+            # fallback: uniform
+            self.weights = [1.0 / self.N] * self.N
+        else:
+            self.weights = [wi / s_w for wi in w]
+
+        # For RViz you’ll still see PoseArray; weights are internal until resampling (Task A4)
+        self.publish_particles()
+
+    def publish_particles(self) -> None:
+        msg = PoseArray()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.frame_id
+
+        for p in self.particles:
+            pose = Pose()
+            pose.position.x = float(p.x)
+            pose.position.y = float(p.y)
+            pose.position.z = 0.0
+            pose.orientation = yaw_to_quat(float(p.theta))
+            msg.poses.append(pose)
+
+        self.pub_particles.publish(msg)
+
+
+def main():
+    rclpy.init()
+    node = MCLLocalizationPF()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()

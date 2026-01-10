@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'particle_initializer = mcl_localization.particle_initializer:main',
             'mcl_prediction = mcl_localization.mcl_prediction:main',
+            'mcl_localization_pf = mcl_localization.mcl_localization_pf:main',
         ],
     },
 )
