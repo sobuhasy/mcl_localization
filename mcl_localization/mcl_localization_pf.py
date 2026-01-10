@@ -6,15 +6,14 @@ from typing import Dict, List, Optional, Tuple
 import rclpy
 from rclpy.node import Node
 
-from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseArray, Pose, Quaternion
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2
-
 from sensor_msgs_py import point_cloud2
 
 
-def wrap_to_pi(a: float) -> float:
-    return (a + math.pi) % (2.0 * math.pi) - math.pi
+def wrap_to_pi(angle: float) -> float:
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def yaw_to_quat(yaw: float) -> Quaternion:
@@ -57,7 +56,7 @@ class MCLLocalizationPF(Node):
 
         # Motion noise std devs
         self.declare_parameter("trans_noise_std", 0.05)  # meters
-        self.declare_parameter("rot_noise_std", 0.02)    # radians
+        self.declare_parameter("rot_noise_std", 0.02)  # radians
 
         # Measurement noise variance (matches your fake_robot param name)
         self.declare_parameter("measurement_noise_variance", 0.02)
@@ -102,8 +101,8 @@ class MCLLocalizationPF(Node):
 
         self.publish_particles()
         self.get_logger().info(
-            f"MCLLocalizationPF started. N={self.N}, odom={self.odom_topic}, map={self.map_topic}, obs={self.obs_topic}, "
-            f"meas_sigma={self.meas_sigma:.4f}"
+            f"MCLLocalizationPF started. N={self.N}, odom={self.odom_topic}, map={self.map_topic}, "
+            f"obs={self.obs_topic}, meas_sigma={self.meas_sigma:.4f}"
         )
 
     def _init_uniform_particles(self, N: int) -> List[Particle]:
@@ -143,7 +142,6 @@ class MCLLocalizationPF(Node):
             p.y += noisy_trans * math.sin(direction)
             p.theta = wrap_to_pi(p.theta + noisy_rot)
 
-        # (We publish after measurement update too, but publishing here is fine)
         self.publish_particles()
 
     # ------------------ Map landmarks subscriber ------------------
@@ -157,18 +155,17 @@ class MCLLocalizationPF(Node):
 
         if lm:
             self.landmark_map = lm
-            self.get_logger().info(f"Loaded landmark map with {len(self.landmark_map)} landmarks (from {msg.header.frame_id}).")
-            # Optionally unsubscribe after first map to reduce load
-            # self.destroy_subscription(self.sub_map)
+            self.get_logger().info(
+                f"Loaded landmark map with {len(self.landmark_map)} landmarks "
+                f"(from {msg.header.frame_id})."
+            )
 
     # ------------------ Task A3: Measurement update ------------------
 
     def on_observed_landmarks(self, msg: PointCloud2) -> None:
         if not self.landmark_map:
-            # Map not received yet
             return
 
-        # Read observed points in robot frame with id
         observations = []
         for pt in point_cloud2.read_points(msg, field_names=("x", "y", "id"), skip_nans=True):
             xr, yr, lid = pt
@@ -177,20 +174,17 @@ class MCLLocalizationPF(Node):
                 observations.append((float(xr), float(yr), lid))
 
         if not observations:
-            # No usable observations -> keep weights as-is
             return
 
         inv_2sig2 = 1.0 / (2.0 * self.meas_sigma * self.meas_sigma)
 
-        # Compute log-likelihood for each particle
         logw = []
-        for i, p in enumerate(self.particles):
+        for p in self.particles:
             c = math.cos(p.theta)
             s = math.sin(p.theta)
 
             ll = 0.0
             for (xr, yr, lid) in observations:
-                # Transform obs from robot frame to map frame using particle pose
                 xm = p.x + c * xr - s * yr
                 ym = p.y + s * xr + c * yr
 
@@ -199,21 +193,18 @@ class MCLLocalizationPF(Node):
                 ey = ym - yg
                 e2 = ex * ex + ey * ey
 
-                ll += -e2 * inv_2sig2  # log Gaussian (up to constant)
+                ll += -e2 * inv_2sig2
 
             logw.append(ll)
 
-        # Convert log weights to normalized weights safely
         maxll = max(logw)
-        w = [math.exp(lw - maxll) for lw in logw]  # shift for numerical stability
+        w = [math.exp(lw - maxll) for lw in logw]
         s_w = sum(w)
         if s_w <= 0.0 or not math.isfinite(s_w):
-            # fallback: uniform
             self.weights = [1.0 / self.N] * self.N
         else:
             self.weights = [wi / s_w for wi in w]
 
-        # For RViz you’ll still see PoseArray; weights are internal until resampling (Task A4)
         self.publish_particles()
 
     def publish_particles(self) -> None:
