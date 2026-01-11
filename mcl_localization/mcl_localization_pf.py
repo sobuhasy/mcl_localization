@@ -210,33 +210,19 @@ class MCLLocalizationPF(Node):
         worst = min(self.weights)
         self.get_logger().info(f"Measurement update: best weight={best:.6f}, worst weight={worst:.6f}")
 
+        # Publish pose estimate from the weighted set
+        self.publish_estimated_pose()
+
         neff = self.neff()
         if neff < 0.5 * self.N:
             self.low_variance_resample()
             self.roughen()
             self.get_logger().info(f"Resampled: Neff={neff:.1f} < {0.5 * self.N:.1f}")
 
+            # Publish pose again after resampling (optional but recommended)
+            self.publish_estimated_pose()
+
         self.publish_particles()
-
-    def neff(self) -> float:
-        return 1.0 / sum(w * w for w in self.weights)
-
-    def low_variance_resample(self) -> None:
-        new_particles: List[Particle] = []
-        r = random.random() / self.N
-        c = self.weights[0]
-        i = 0
-
-        for m in range(self.N):
-            u = r + m / self.N
-            while u > c and i < self.N - 1:
-                i += 1
-                c += self.weights[i]
-            p = self.particles[i]
-            new_particles.append(Particle(x=p.x, y=p.y, theta=p.theta))
-
-        self.particles = new_particles
-        self.weights = [1.0 / self.N] * self.N
 
     def estimate_pose(self) -> Particle:
         """Compute weighted mean pose from particles (x, y) and circular mean for theta."""
@@ -263,7 +249,7 @@ class MCLLocalizationPF(Node):
 
         theta_hat = math.atan2(s_hat, c_hat)
         return Particle(x=x_hat, y=y_hat, theta=wrap_to_pi(theta_hat))
-    
+
     def publish_estimated_pose(self) -> None:
         est = self.estimate_pose()
 
@@ -276,7 +262,7 @@ class MCLLocalizationPF(Node):
         msg.pose.position.z = 0.0
         msg.pose.orientation = yaw_to_quat(float(est.theta))
 
-        self.pub.est_pose.publish(msg)
+        self.pub_est_pose.publish(msg)
 
 
     def roughen(self, std_xy: float = 0.01, std_th: float = 0.005) -> None:
@@ -302,7 +288,7 @@ class MCLLocalizationPF(Node):
 
     def neff(self) -> float:
         return 1.0 / sum(w * w for w in self.weights)
-    
+
     def low_variance_resample(self) -> None:
         N = self.N
         new_particles: List[Particle] = []
