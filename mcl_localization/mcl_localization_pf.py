@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import rclpy
 from rclpy.node import Node
 
-from geometry_msgs.msg import PoseArray, Pose, Quaternion
+from geometry_msgs.msg import PoseArray, Pose, PoseStamped, Quaternion
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -94,6 +94,7 @@ class MCLLocalizationPF(Node):
 
         # ---------- ROS I/O ----------
         self.pub_particles = self.create_publisher(PoseArray, "particles", 10)
+        self.pub_est_pose = self.create_publisher(PoseStamped, "mcl_pose", 10)
 
         self.sub_odom = self.create_subscription(Odometry, self.odom_topic, self.on_odom, 50)
         self.sub_map = self.create_subscription(PointCloud2, self.map_topic, self.on_map_landmarks, 10)
@@ -236,6 +237,47 @@ class MCLLocalizationPF(Node):
 
         self.particles = new_particles
         self.weights = [1.0 / self.N] * self.N
+
+    def estimate_pose(self) -> Particle:
+        """Compute weighted mean pose from particles (x, y) and circular mean for theta."""
+        # Ensure weights are normalized and valid
+        if len(self.weights) != self.N:
+            w = [1.0 / self.N] * self.N
+        else:
+            s = sum(self.weights)
+            if s <= 0.0 or not math.isfinite(s):
+                w = [1.0 / self.N] * self.N
+            else:
+                w = [wi / s for wi in self.weights]
+
+        x_hat = 0.0
+        y_hat = 0.0
+        c_hat = 0.0
+        s_hat = 0.0
+
+        for wi, p in zip(w, self.particles):
+            x_hat += wi * p.x
+            y_hat += wi * p.y
+            c_hat += wi * math.cos(p.theta)
+            s_hat += wi * math.sin(p.theta)
+
+        theta_hat = math.atan2(s_hat, c_hat)
+        return Particle(x=x_hat, y=y_hat, theta=wrap_to_pi(theta_hat))
+    
+    def publish_estimated_pose(self) -> None:
+        est = self.estimate_pose()
+
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.frame_id
+
+        msg.pose.position.x = float(est.x)
+        msg.pose.position.y = float(est.y)
+        msg.pose.position.z = 0.0
+        msg.pose.orientation = yaw_to_quat(float(est.theta))
+
+        self.pub.est_pose.publish(msg)
+
 
     def roughen(self, std_xy: float = 0.01, std_th: float = 0.005) -> None:
         for p in self.particles:
