@@ -6,7 +6,6 @@ from typing import Optional
 import rclpy
 from rclpy.node import Node
 
-from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
 
 
@@ -70,21 +69,21 @@ class PFEvaluator(Node):
     def now_s(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
     
-    def gt_callback(self, msg: Odometry):
+    def gt_callback(self, msg: PoseStamped):
         t = self.now_s()
         x = float(msg.pose.position.x)
         y = float(msg.pose.position.y)
-        yaw = wrap_to_pi(quat_to_yaw(msg.pose.pose.orientation.z, msg.pose.pose.orientation.w))
+        yaw = wrap_to_pi(quat_to_yaw(msg.pose.orientation.z, msg.pose.orientation.w))
         self.gt = Pose2D(x, y, yaw, t)
-        self.evaluate()
+        self.try_update()
 
-    def est_callback(self, msg: Odometry):
+    def est_callback(self, msg: PoseStamped):
         t = self.now_s()
         x = float(msg.pose.position.x)
         y = float(msg.pose.position.y)
-        yaw = wrap_to_pi(quat_to_yaw(msg.pose.pose.orientation.z, msg.pose.pose.orientation.w))
+        yaw = wrap_to_pi(quat_to_yaw(msg.pose.orientation.z, msg.pose.orientation.w))
         self.est = Pose2D(x, y, yaw, t)
-        self.evaluate()
+        self.try_update()
 
     def try_update(self):
         if self.gt is None or self.est is None:
@@ -113,12 +112,17 @@ class PFEvaluator(Node):
         else:
             self.conv_start = None
 
-        self.writer.writerow([t, self.est.x - self.gt.x, self.est.y - self.gt.y, e_yaw,
-                              math.sqrt(self.sum_squared_error_xy / self.num_samples),
-                              math.sqrt(self.sum_squared_error_yaw / self.num_samples)])
+        self.csv_writer.writerow([
+            t,
+            self.est.x - self.gt.x,
+            self.est.y - self.gt.y,
+            e_yaw,
+            math.sqrt(self.sum_squared_error_xy / self.num_samples),
+            math.sqrt(self.sum_squared_error_yaw / self.num_samples),
+        ])
 
     def destroy_node(self):
-        if self.n > 0:
+        if self.num_samples > 0:
             rmse_xy = math.sqrt(self.sum_squared_error_xy / self.num_samples)
             rmse_yaw = math.sqrt(self.sum_squared_error_yaw / self.num_samples)
 
@@ -128,22 +132,27 @@ class PFEvaluator(Node):
                 conv_str = f"{self.conv_time:.2f}s converged"
 
             if self.rmse_only_xy:
-                self.get_logger().info(f"RMSE_xy={rmse_xy:.4f} m, convergence={conv_str}, samples={self.n}")
+                self.get_logger().info(
+                    f"RMSE_xy={rmse_xy:.4f} m, convergence={conv_str}, samples={self.num_samples}"
+                )
             else:
-                self.get_logger().info(f"RMSE_xy={rmse_xy:.4f} m, RMSE_yaw={rmse_yaw:.4f} rad, convergence={conv_str}, samples={self.n}")
+                self.get_logger().info(
+                    f"RMSE_xy={rmse_xy:.4f} m, RMSE_yaw={rmse_yaw:.4f} rad, "
+                    f"convergence={conv_str}, samples={self.num_samples}"
+                )
 
         try:
-            self.f.flush()
-            self.f.close()
+            self.csv_file.flush()
+            self.csv_file.close()
         except Exception:
             pass
         super().destroy_node()
 
-    def main():
-        rclpy.init()
-        node = PFEvaluator()
-        try:
-            rclpy.spin(node)
-        finally:
-            node.destroy_node()
-            rclpy.shutdown()
+def main():
+    rclpy.init()
+    node = PFEvaluator()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
