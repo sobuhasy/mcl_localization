@@ -27,6 +27,7 @@ setup(
             'particle_initializer = mcl_localization.particle_initializer:main',
             'mcl_prediction = mcl_localization.mcl_prediction:main',
             'mcl_localization_pf = mcl_localization.mcl_localization_pf:main',
+            'pf_eval = mcl_localization.pf_eval:main',
         ],
     },
 )
