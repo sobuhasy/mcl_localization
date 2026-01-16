@@ -5,7 +5,7 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
-
+from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
 
 
@@ -61,7 +61,7 @@ class PFEvaluator(Node):
         self.csv_writer.writerow(['time', 'error_x', 'error_y', 'error_yaw', 'rmse_xy', 'rmse_yaw'])
 
         # subscribers
-        self.create_subscription(PoseStamped, self.gt_topic, self.gt_callback, 50)
+        self.create_subscription(Odometry, self.gt_topic, self.gt_callback, 50)
         self.create_subscription(PoseStamped, self.est_topic, self.est_callback, 50)
 
         self.get_logger().info(f'Logging to {self.output_csv}(gt: {self.gt_topic}, est: {self.est_topic})')
@@ -69,11 +69,12 @@ class PFEvaluator(Node):
     def now_s(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
     
-    def gt_callback(self, msg: PoseStamped):
+    def gt_callback(self, msg: Odometry):
         t = self.now_s()
-        x = float(msg.pose.position.x)
-        y = float(msg.pose.position.y)
-        yaw = wrap_to_pi(quat_to_yaw(msg.pose.orientation.z, msg.pose.orientation.w))
+        x = float(msg.pose.pose.position.x)
+        y = float(msg.pose.pose.position.y)
+        q = msg.pose.pose.orientation
+        yaw = wrap_to_pi(quat_to_yaw(q.z, q.w))
         self.gt = Pose2D(x, y, yaw, t)
         self.try_update()
 
